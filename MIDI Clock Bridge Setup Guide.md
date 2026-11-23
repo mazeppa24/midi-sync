@@ -61,45 +61,64 @@ Paste this whole block into Terminal and press Enter. It saves `bridge.py` in yo
 
 ```bash
 cat > ~/bridge.py << 'EOF'
-import sys, mido
+import argparse, mido
 
-# Usage:  bridge.py <dest> [<dest> ...]   e.g.  bridge.py T-1   or   bridge.py Deluge T-1
 KEEP = {"clock", "start", "stop", "continue", "songpos"}
 
+ap = argparse.ArgumentParser(description="Forward MIDI clock from the DJM-A9 to synths.")
+ap.add_argument("outputs", nargs="*", default=["Deluge"],
+                help="output names (part of the name is enough)")
+ap.add_argument("--in", dest="inp", default="DJM",
+                help="input name (part of the name), default: DJM")
+ap.add_argument("--list", action="store_true", help="list MIDI ports and exit")
+args = ap.parse_args()
+
 ins, outs = mido.get_input_names(), mido.get_output_names()
-print("Inputs: ", ins)
-print("Outputs:", outs)
+print("Inputs:");  [print("  ", n) for n in ins]
+print("Outputs:"); [print("  ", n) for n in outs]
+if args.list:
+    raise SystemExit
 
-wanted = sys.argv[1:] or ["Deluge"]
-src = next((n for n in ins if "djm" in n.lower()), None)
+def find(name, names, kind):
+    matches = [n for n in names if name.lower() in n.lower()]
+    if not matches:
+        print(f"!! No {kind} matching '{name}'")
+        return None
+    if len(matches) > 1:
+        print(f"Note: several {kind}s match '{name}': {matches} -> using '{matches[0]}'")
+    return matches[0]
+
+def open_port(opener, name):
+    try:
+        return opener(name)
+    except Exception as e:
+        raise SystemExit(f"\nCould not open '{name}': {e}\n"
+                         "It's probably in use by another app (Resolume, rekordbox, a DAW). "
+                         "Disable it there and try again.")
+
+src = find(args.inp, ins, "input")
 if not src:
-    raise SystemExit("\nDJM-A9 not found - is it connected via USB A with MIDI ON?")
-
-dests = []
-for w in wanted:
-    match = next((n for n in outs if w.lower() in n.lower()), None)
-    if match:
-        dests.append(match)
-    else:
-        print(f"\n!! No output matching '{w}' - check the Outputs list above.")
+    raise SystemExit('Check the Inputs list above, or pick one with --in "<name>".')
+dests = [d for d in (find(o, outs, "output") for o in args.outputs) if d]
 if not dests:
-    raise SystemExit("\nNo destinations found.")
+    raise SystemExit("No outputs found.")
 
-ports = [mido.open_output(d) for d in dests]
+inport = open_port(mido.open_input, src)
+ports = [open_port(mido.open_output, d) for d in dests]
 print(f"\nForwarding clock: {src} -> {', '.join(dests)}")
 print("Press Ctrl+C to stop.\n")
 
 try:
-    with mido.open_input(src) as i:
-        for msg in i:
-            if msg.type in KEEP:
-                for p in ports:
-                    p.send(msg)
-                if msg.type != "clock":
-                    print("Sent:", msg.type)
+    for msg in inport:
+        if msg.type in KEEP:
+            for p in ports:
+                p.send(msg)
+            if msg.type != "clock":
+                print("Sent:", msg.type)
 except KeyboardInterrupt:
     pass
 finally:
+    inport.close()
     for p in ports:
         p.close()
 EOF
@@ -113,9 +132,13 @@ With everything connected and MIDI ON lit on the A9, open Terminal and run the c
 
 | What you want | Command |
 | --- | --- |
+| Show all MIDI ports | `~/midibridge/bin/python ~/bridge.py --list` |
 | Both synths | `~/midibridge/bin/python ~/bridge.py Deluge T-1` |
 | Deluge only | `~/midibridge/bin/python ~/bridge.py Deluge` |
 | T-1 only | `~/midibridge/bin/python ~/bridge.py T-1` |
+| Choose the input explicitly | `~/midibridge/bin/python ~/bridge.py Deluge T-1 --in "DJM-A9"` |
+
+The script picks the first input with "DJM" in its name. If `--list` shows the A9 more than once or under an unexpected name, copy the exact name into `--in "..."`. Names only need to match in part, ignoring upper and lower case.
 
 Terminal lists the MIDI ports, then shows a line starting "Forwarding clock". Leave that window open the whole time you play.
 
@@ -154,16 +177,20 @@ Two Windows-specific points:
 - **One app per MIDI port.** Windows normally lets only one program open a MIDI port. Close rekordbox, MIDI-OX or any DAW using the DJM-A9 or the synths before starting the bridge, or the script can't open them.
 - **Keep USB awake.** Set the laptop to never sleep, and turn off USB selective suspend in the power plan's advanced settings. Otherwise Windows can cut power to a USB port mid-set.
 
+**Running alongside Resolume.** The one-app limit applies per port, so Resolume can keep using the lighting controller while the bridge uses the A9 and synths. In Resolume, open **Preferences → MIDI** and leave only the lighting controller enabled; turn off the DJM-A9, Deluge and T-1. Start Resolume first, then the bridge. All commands from Running it each session work here too: replace `~/midibridge/bin/python ~/bridge.py` with `%USERPROFILE%\midibridge\Scripts\python %USERPROFILE%\bridge.py`.
+
 Run a full test on the gig laptop with the A9, Deluge and T-1 connected before the show.
 
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
-| "DJM-A9 not found" | Mixer not sending MIDI, or on the wrong port | Use the A9's USB A port and check MIDI ON is lit |
-| "No output matching 'T-1'" (or 'Deluge') | The synth uses a different port name, or isn't connected | Check the cable, then use part of the name shown in the Outputs list |
+| "No input matching 'DJM'" | Mixer not sending MIDI, or on the wrong port | Use the A9's USB A port and check MIDI ON is lit |
+| "No output matching 'T-1'" (or 'Deluge') | The synth uses a different port name, or isn't connected | Run with `--list`, then use part of the name shown |
+| "Could not open …" | Another app (Resolume, rekordbox, a DAW) has the port | Disable that device in the other app, or close it, and start the bridge again |
+| "Several inputs match" | The A9 or another device appears more than once | Pick the right one with `--in "<exact name>"` |
 | "No such file or directory" | The install or script step was skipped | Repeat the One-time install and Create the script sections |
-| Synth tempo far too slow or erratic | A second clock source, such as a DIN cable from a USB host box | Remove other MIDI cables so the Mac is the only clock |
+| Synth tempo far too slow or erratic | A second clock source, such as a DIN cable from a USB host box | Remove other MIDI cables so the laptop is the only clock |
 | Synth doesn't move at all | Its transport isn't running, or clock in is off | Press play on the synth and check its clock-in setting |
 | A9 shows the wrong BPM | Beat FX channel selector on an empty channel | Set it to the playing channel or Master |
 
